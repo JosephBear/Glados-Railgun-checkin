@@ -2,11 +2,6 @@ name: auto check
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - 'README.md'
-      - 'imgs/**'
   schedule:
     - cron: '0 4,10 * * *'
 
@@ -51,9 +46,11 @@ jobs:
         PUSHDEER_SENDKEY: ${{ secrets.PUSHDEER_SENDKEY }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
+        GLADOS_AUTO_EXCHANGE: ${{ vars.GLADOS_AUTO_EXCHANGE || 'false' }}
         GLADOS_VERBOSE: ${{ secrets.GLADOS_VERBOSE }}
 
     - name: Keep alive
+      if: ${{ always() }}
       uses: liskin/gh-workflow-keepalive@v1 
         
     - name: Delete workflow runs

@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import sys
 import logging
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
@@ -97,6 +98,7 @@ class Config:
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
+    ENV_AUTO_EXCHANGE = "GLADOS_AUTO_EXCHANGE"
     ENV_VERBOSE = "GLADOS_VERBOSE"
 
     """默认兑换计划"""
@@ -119,6 +121,7 @@ class Config:
         self.push_key: str = ""
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
+        self.auto_exchange: bool = False
         self.verbose: bool = self.DEFAULT_VERBOSE
         self._load_config()
 
@@ -128,6 +131,9 @@ class Config:
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
+        auto_exchange_env = os.environ.get(self.ENV_AUTO_EXCHANGE, "false").strip().lower()
+        self.auto_exchange = auto_exchange_env in ["true", "1", "yes", "y"]
+        logger.info(f"{LogEmoji.INFO} 自动兑换积分: {'已开启' if self.auto_exchange else '已关闭'}。")
 
         if not push_key_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_PUSH_KEY}' 未设置。")
@@ -472,21 +478,28 @@ class Checker:
             points_str, points_num = api.get_points(cookie)
             result.points_total = points_str
 
-            # 4. 执行兑换
+            # 4. 仅在明确开启、当前域名签到有效且积分足够时兑换。
             required_points = self.config.EXCHANGE_PLANS.get(self.config.exchange_plan, 500)
-            self._log(
-                cookie_idx,
-                domain,
-                LogEmoji.EXCHANGE,
-                f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
-            )
-            result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
+            if not self.config.auto_exchange:
+                result.exchange = "自动兑换已关闭"
+            elif result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT) and points_num >= required_points:
+                self._log(cookie_idx, domain, LogEmoji.EXCHANGE, f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)")
+                result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
 
         return result
 
     def get_results(self) -> List[Dict[str, str]]:
         """获取所有结果"""
         return [result.to_dict() for result in self.results]
+
+    def failed_cookie_indexes(self) -> List[int]:
+        """每个 Cookie 至少在一个支持的域名成功或已签到，才算有效。"""
+        accepted = {
+            result.cookie_index
+            for result in self.results
+            if result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT)
+        }
+        return [index for index in range(1, len(self.config.cookies_list) + 1) if index not in accepted]
 
     def format_results(self) -> Tuple[str, str, str]:
         """格式化结果"""
@@ -519,8 +532,10 @@ class Checker:
 logger = init_logger()
 
 
-def main():
+def main() -> int:
     """主函数"""
+    config = None
+    exit_code = 1
     try:
         # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
@@ -539,6 +554,11 @@ def main():
             logger.info(f"{LogEmoji.START} 步骤 3: 格式化结果")
             title, content, log_content = checker.format_results()
             logger.info(f"\n{LogEmoji.END}========== 签到总结 ==========\n{title}\n{log_content}")
+            failed_cookies = checker.failed_cookie_indexes()
+            if failed_cookies:
+                logger.error(f"{LogEmoji.ERROR} 以下 Cookie 在所有域名均签到失败: {failed_cookies}。请检查或更新对应 Cookie。")
+            else:
+                exit_code = 0
 
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
@@ -546,10 +566,13 @@ def main():
 
     # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
-    push_service = PushService(config if "config" in locals() else "")
-    push_service.send(title, content)
+    if config is not None:
+        push_service = PushService(config)
+        push_service.send(title, content)
     logger.info(f"{LogEmoji.END} 签到完成")
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
+
